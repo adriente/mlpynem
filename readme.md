@@ -63,7 +63,7 @@ pip install -e .
 
 ## Use the package
 
-We recommend the use of the notebooks. Run first the `datasets.ipynb` notebook and then run the `train_cnn.ipynb` or `train_dnn.ipynb`. Then you can compare the performance of the different networks by looking at the logs.
+We recommend the use of the notebooks. Run first the `datasets.ipynb` notebook and then run the `train_cnn.ipynb`. Then you can compare the performance of the different networks by looking at the logs.
 
 ## To do
 
