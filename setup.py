@@ -10,7 +10,8 @@ setup(
         'jupyter',
         'matplotlib',
         'lmfit',
-        'tqdm'],
+        'tqdm',
+        'scikit-image'],
     
 
     # metadata to display on PyPI

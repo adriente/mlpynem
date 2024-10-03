@@ -1,9 +1,9 @@
-from mlpynem.pinem import Pinem
+from mlpynem.simulation import SpectrumSimulation
 import numpy as np
 from tqdm import tqdm
 import itertools
 
-class DatasetPinem():
+class Dataset():
     """
     Dataset class for the PINEM model. It used to generate a set of PINEM spectra for the training of a neural network.
     The dataset can be saved and loaded from a file.
@@ -23,61 +23,100 @@ class DatasetPinem():
     """
     def __init__(
         self,
-        x: np.ndarray,
-        amplitude: float,
-        kernel,
-        lower_bound: np.ndarray,
-        upper_bound: np.ndarray,
+        simulation : SpectrumSimulation = None,
+        parameters : dict = None,
+        amplitude: float = 1.0,
         n: int = 1024 * 64,
         load: str = None,
         seed: int = 42,
-        n_cutoff: int = 50,
-        background: float = 0.0
+        background: np.array = 0.0
     ):
         if load is None : 
             self.n = n
-            self.lower_bound = lower_bound
-            self.upper_bound = upper_bound
+            self.parameters = parameters
             self.seed = seed
             self.amplitude = amplitude
-            self.p = Pinem(x=x,amplitude=amplitude, kernel=kernel, n_cutoff=n_cutoff)
+            self.simulation = simulation
             self.background = background
-            self.gen_data()            
+            # self.gen_data()            
         else : 
             self.load_model(load)
 
+    # def expand_bounds(self) : 
+    #     """
+    #     Expand the bounds of the parameters to the number of spectra to generate
+    #     """
 
-    def expand_bounds(self) : 
+    #     lb = np.expand_dims(self.lower_bound, axis=1)
+    #     ub = np.expand_dims(self.upper_bound, axis=1)
+    #     nlb = lb@(np.ones((1,self.n)))
+    #     nub = ub@(np.ones((1,self.n)))
+    #     return nlb, nub
+            
+    def generate_truth(self, method : str = 'random') :
         """
-        Expand the bounds of the parameters to the number of spectra to generate
-        """
-        lb = np.expand_dims(self.lower_bound, axis=1)
-        ub = np.expand_dims(self.upper_bound, axis=1)
-        nlb = lb@(np.ones((1,self.n)))
-        nub = ub@(np.ones((1,self.n)))
-        return nlb, nub
+        Generate the true values of the parameters for the dataset. The method is 'random' for now.
+        """        
+        if method == 'random' :
+            self.truth = self.init_truth(self.n)
+            for key in self.parameters.keys() :
+                self.truth[key] = np.random.uniform(self.parameters[key][0], self.parameters[key][1], size=(self.n,))
+        elif method == 'grid' :
+            new_params = {}
+            actual_n = 1
+            for key in self.parameters.keys() :
+                if self.parameters[key][1] - self.parameters[key][0] == 0 :
+                    new_params[key] = np.array([self.parameters[key][0]])
+                else :
+                    new_params[key] = np.linspace(self.parameters[key][0], self.parameters[key][1], self.n)
+                    actual_n *= self.n
+            self.truth = self.init_truth(actual_n)
+            for j, params in enumerate(iterate_combinations(new_params)):
+                for key in params.keys() :
+                    self.truth[key][j] = params[key]
+            self.n = actual_n
+
+        else :
+            raise ValueError("The method must be 'random' or 'grid'")
+        
+    def init_truth(self, length : int = None) :
+        list_dt = [(key, np.float64, length) for key in self.parameters.keys()]
+        # return np.array([np.zeros()]*len(list_dt), dtype = np.dtype(list_dt))  
+        return np.zeros((), dtype = np.dtype(list_dt))      
 
     def gen_data(self) :
         """
         Generate random values for the parameters and generate the spectra. Stores both the noisy and noiseless spectra in the object.
         """
         np.random.seed(self.seed)
-        elb, eub = self.expand_bounds()
         # One set of random parameters for each spectrum
-        self.xs = (np.random.uniform(elb, eub, size=(5,self.n))).T
-        len_x = self.p.x.shape[0]
-        self.spectres = np.zeros((self.n, len_x))
-        for i, x in tqdm(enumerate(self.xs)) :
-            self.spectres[i,:] = (self.p.calc_sq_modulus(omega=x[3], g =  x[0], offset=  x[4], fwhm = x[2], rt = x[1]))[:,np.newaxis].T 
-        # The self.spectres are normalized to the range [0, self.amplitude] then we add the background  
-        self.noiseless_spectres = self.spectres + self.amplitude*self.background
-        self.noisy_spectres = np.random.poisson(self.spectres+self.background*self.amplitude)
+        len_energy = self.simulation.energy_axis.shape[0]
+        spectres = np.zeros((self.n, len_energy))
+        for i in tqdm(range(self.n)) :
+            current_dict = {key : self.truth[key][i] for key in self.parameters.keys()}
+            spectres[i,:] = self.simulation.output_spectrum(**current_dict)[:,np.newaxis].T 
+        # The spectres are normalized to the range [0, self.amplitude] then we add the background 
+        self.noiseless_spectres = (spectres + self.background)*self.amplitude
+        self.noisy_spectres = np.random.poisson((spectres+self.background)*self.amplitude)
             
 
     def __len__(self):
         return self.n
     
     # TODO : Add a __getitem__ method to get a specific spectrum
+
+    # TODO : Add a gen_data_vec, that generates the data in a vectorized way
+
+    def get_truth(self, names) :
+        """
+        Get the true values of some of the parameters for the dataset.
+
+        Args:
+        - names (list[str]): The names of the parameters to get
+        """
+        l = [self.truth[name] for name in names]
+        ar = np.array(l).T
+        return ar
     
     def save_model(self, path) :
         """
@@ -87,24 +126,17 @@ class DatasetPinem():
         - path (str): The path to the file to save the dataset to
         """
         d = {}
-        float_dt = np.dtype([('amplitude', np.float64),
-                             ('n_cutoff', np.int64),
-                             ('n', np.int64),
-                             ('background', np.float64),
-                             ('seed', np.int64)])
-        float_arr = np.array([(self.p.amplitude, self.p.n_cutoff, self.n, self.background, self.seed)], dtype=float_dt)
-        bounds_dt = ['lower_bound', 'upper_bound']
-        bounds_arr = np.rec.fromarrays([self.lower_bound, self.upper_bound], names=bounds_dt)
-        d['x'] = self.p.x
-        if type(self.p.kernel) == np.ndarray :
-            d['kernel'] = self.p.kernel
-        else : 
-            str_arr = np.rec.fromarrays([self.p.kernel], names=['kernel'])
-            d['kernel'] = str_arr
-        d['floats'] = float_arr
-        d['bounds'] = bounds_arr
-        d['xs'] = self.xs
-        d['spectres'] = self.spectres 
+        d['amplitude'] = self.amplitude
+        d['seed'] = self.seed
+        d['n'] = self.n
+        d['background'] = self.background
+        d['parameters'] = {}
+        d['simulation'] = {}
+        for key in self.parameters.keys() :
+            d['parameters'][key] = self.parameters[key]
+        for key in self.simulation.as_dict().keys() :
+            d['simulation'][key] = self.simulation.as_dict()[key]
+        d['truth'] = self.truth
         d['noiseless_spectres'] = self.noiseless_spectres
         d['noisy_spectres'] = self.noisy_spectres
         np.savez(path, **d)
@@ -117,26 +149,13 @@ class DatasetPinem():
         - path (str): The path to the file to load the dataset from.
         """
         d = np.load(path, allow_pickle=True)
-        self.xs = d['xs']
-        self.spectres = d['spectres']
+        self.truth = d['truth']
         self.noisy_spectres = d['noisy_spectres']
         self.noiseless_spectres = d['noiseless_spectres']
-        self.lower_bound = d['bounds']['lower_bound']
-        self.upper_bound = d['bounds']['upper_bound']
-        self.background = d['floats']['background'][0]
-        self.seed = d['floats']['seed'][0]
-        self.n = d['floats']['n'][0]
-        if d['kernel'].shape == () :
-            self.p = Pinem(x=d['x'],
-                           amplitude=d['floats']['amplitude'][0],
-                           kernel=d['kernel']['kernel'].item(),
-                           n_cutoff=d['floats']['n_cutoff'][0]
-                        )
-        else :
-            self.p = Pinem(x=d['x'],
-                           amplitude=d['floats']['amplitude'][0],
-                           kernel=d['kernel'],
-                           n_cutoff=d['floats']['n_cutoff'][0])
+        self.background = d['background']
+        self.seed = d['seed']
+        self.n = d['n']
+        self.amplitude = d['amplitude']
         
     
 def normalize_spectra(spectra: np.ndarray) -> np.ndarray:
@@ -153,63 +172,6 @@ def normalize_spectra(spectra: np.ndarray) -> np.ndarray:
         print('nan')
         print(np.argwhere(np.isnan(int_sp)))
     return (spectra - m[:, np.newaxis]) / (M - m)[:, np.newaxis]
-
-class TestPinem() :
-    """
-    Class to generate a sequence of controlled PINEM spectra (i.e. with known parameters) for testing purposes.
-
-    TODO : Merge with DatasetPinem
-
-    Args:
-    - dataset_file (str): The path to the file to load the dataset from
-    - params_dict (dict): A dictionary of lists with the parameters to vary. The keys are the names of the parameters and the values are the values to test.
-    - n (int): The number of spectra to generate per parameter. The total number of spectra will be n**len(params_dict)
-    - true_coords_keys (list[str]): The keys of the parameters to use as the true coordinates of the spectra. They should correspond to the output of the neural network.
-    """
-    def __init__(self, dataset_file : str, params_dict : dict, n : int = 20, true_coords_keys : list[str] = None) : 
-        self.dataset_file = dataset_file
-        self.params_dict = params_dict
-        self.dataset = np.load(dataset_file)
-        self.x = self.dataset['x']
-        self.amplitude = self.dataset['floats']['amplitude'][0]
-        kt = self.dataset['kernel']
-        if not(kt.shape == ()):
-            self.kernel = kt
-        else : 
-            self.kernel = kt['kernel'].item()
-        self.n_cutoff = self.dataset['floats']['n_cutoff'][0]
-        self.background = self.dataset['floats']['background'][0]
-        self.n = n
-        self.p = Pinem(x=self.x, amplitude=self.amplitude, kernel=self.kernel, n_cutoff=self.n_cutoff)
-        self.true_coords_keys = true_coords_keys
-
-    def generate_data(self) :
-        """
-        Generate the spectra according to the parameters in params_dict. It goes through all the combinations of the parameters and generates a spectrum for each combination.
-        """
-        truth = []
-        data = [] 
-        for params in tqdm(iterate_combinations(self.params_dict)):
-            true_coords = [params[i] for i in self.params_dict.keys() if i in self.true_coords_keys]
-            truth.append(true_coords)
-            test = self.p.calc_sq_modulus(**params)
-            test = np.random.poisson(test+ self.background*self.amplitude)
-            data.append(test)
-
-        self.data = np.array(data)
-        self.truth = np.array(truth)
-    
-    def save_data(self, save_folder : str) :
-        """
-        Save the generated data to a file.
-
-        Args:
-        - save_folder (str): The path to the file to save the data to
-        """
-        np.savez(save_folder, data=self.data, truth=self.truth)
-        print('Data saved in {}'.format(save_folder))
-
-
 
 def iterate_combinations(params_dict):
     """
